@@ -2,6 +2,7 @@ package shell
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -37,6 +38,27 @@ func CloseKillChannelOnKillSignal(kill chan struct{}) {
 	}()
 }
 
+func CloseContextOnKillSignal(cancel context.CancelFunc) {
+	// Set up channel on which to send signal notifications
+	// We must use a buffered channel or risk missing the signal
+	// if we're not ready to receive when the signal
+	c := make(chan os.Signal, 1)
+	sigs := []os.Signal{os.Interrupt, os.Kill}
+	if isLinuxMacOSFreeBSD() {
+		sigs = append(sigs, syscall.SIGTERM)
+	}
+	signal.Notify(c, sigs...)
+	// run gorutine and block until a signal is received
+	go func() {
+		<-c
+		// send signal to threads about pending to close
+		log.Println("Signal received, cancel context")
+		if cancel != nil {
+			cancel()
+		}
+	}()
+}
+
 type ExitCodeOrError struct {
 	ExitCode int
 	Error    error
@@ -51,7 +73,10 @@ type App struct {
 
 func NewApp(name string, args ...string) *App {
 	cmd := exec.Command(name, args...)
+
+	// cmd.Env = append(os.Environ())
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
 	app := &App{cmd: cmd}
 	return app
 }
