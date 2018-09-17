@@ -86,6 +86,12 @@ func (app *App) Run(stdOut *bytes.Buffer, stdErr *bytes.Buffer) ExitCodeOrError 
 	if err != nil {
 		return ExitCodeOrError{0, err}
 	}
+	/*
+		err = syscall.Setpriority(1, app.cmd.Process.Pid, 19)
+		if err != nil {
+			return ExitCodeOrError{0, err}
+		}
+	*/
 	st := app.Wait()
 	return st
 }
