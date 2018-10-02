@@ -38,7 +38,7 @@ func CloseKillChannelOnKillSignal(kill chan struct{}) {
 	}()
 }
 
-func CloseContextOnKillSignal(cancel context.CancelFunc) {
+func CloseContextOnKillSignal(cancel context.CancelFunc, done chan struct{}) {
 	// Set up channel on which to send signal notifications
 	// We must use a buffered channel or risk missing the signal
 	// if we're not ready to receive when the signal
@@ -50,11 +50,16 @@ func CloseContextOnKillSignal(cancel context.CancelFunc) {
 	signal.Notify(c, sigs...)
 	// run gorutine and block until a signal is received
 	go func() {
-		<-c
-		// send signal to threads about pending to close
-		log.Println("Signal received, cancel context")
-		if cancel != nil {
-			cancel()
+		select {
+		case <-c:
+			// send pending signal to threads to close
+			log.Println("Signal received, cancel context")
+			if cancel != nil {
+				cancel()
+			}
+		// if done is not null, it can be used as an exit from gorutine
+		case <-done:
+			// exit
 		}
 	}()
 }
