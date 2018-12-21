@@ -2,90 +2,55 @@ package shell
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/exec"
-	"os/signal"
-	"runtime"
 	"sync/atomic"
 	"syscall"
 )
 
-func isLinuxMacOSFreeBSD() bool {
-	return runtime.GOOS == "linux" || runtime.GOOS == "darwin" ||
-		runtime.GOOS == "freebsd"
-}
-
-func CloseKillChannelOnKillSignal(kill chan struct{}) {
-	// Set up channel on which to send signal notifications
-	// We must use a buffered channel or risk missing the signal
-	// if we're not ready to receive when the signal
-	c := make(chan os.Signal, 1)
-	sigs := []os.Signal{os.Interrupt, os.Kill}
-	if isLinuxMacOSFreeBSD() {
-		sigs = append(sigs, syscall.SIGTERM)
-	}
-	signal.Notify(c, sigs...)
-	// run gorutine and block until a signal is received
-	go func() {
-		<-c
-		// send signal to threads about pending to close
-		log.Println("Signal received, close kill channel")
-		close(kill)
-	}()
-}
-
-func CloseContextOnKillSignal(cancel context.CancelFunc, done chan struct{}) {
-	// Set up channel on which to send signal notifications
-	// We must use a buffered channel or risk missing the signal
-	// if we're not ready to receive when the signal
-	c := make(chan os.Signal, 1)
-	sigs := []os.Signal{os.Interrupt, os.Kill}
-	if isLinuxMacOSFreeBSD() {
-		sigs = append(sigs, syscall.SIGTERM)
-	}
-	signal.Notify(c, sigs...)
-	// run gorutine and block until a signal is received
-	go func() {
-		select {
-		case <-c:
-			// send pending signal to threads to close
-			log.Println("Signal received, cancel context")
-			if cancel != nil {
-				cancel()
-			}
-		// if done is not null, it can be used as an exit from gorutine
-		case <-done:
-			// exit
-		}
-	}()
-}
-
+// ExitCodeOrError keeps exit code from application termination
+// either error if application failed in any stage.
 type ExitCodeOrError struct {
 	ExitCode int
 	Error    error
 }
 
+// App struct keep everything regarding external application started process
+// including command line, wait channel which tracks process completion
+// and exit code ether any exception happened in any stage of
+// application start up or completion.
 type App struct {
 	cmd             *exec.Cmd
 	waitCh          chan ExitCodeOrError
 	exitCodeOrError atomic.Value
-	// stdOut          atomic.Value
 }
 
+// NewApp return new application instance defined by executable name
+// and arguments, and ready to start by following Run call.
 func NewApp(name string, args ...string) *App {
 	cmd := exec.Command(name, args...)
 
-	// cmd.Env = append(os.Environ())
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	app := &App{cmd: cmd}
 	return app
 }
 
+// AddEnvironments add environments in the form "key=value".
+func (app *App) AddEnvironments(env []string) {
+	if app.cmd.Env == nil {
+		app.cmd.Env = os.Environ()
+	}
+	app.cmd.Env = append(app.cmd.Env, env...)
+}
+
+// Run start application synchronously with link to the process
+// stdout/stderr output, to get output.
+// Method doesn't return control until the application
+// finishes its execution.
 func (app *App) Run(stdOut *bytes.Buffer, stdErr *bytes.Buffer) ExitCodeOrError {
 	_, err := app.Start(stdOut, stdErr)
 	if err != nil {
@@ -107,7 +72,7 @@ func (app *App) sendExitCodeOrError(exitCode int, err error) {
 	app.waitCh <- *state
 }
 
-func readFromIo(read io.ReadCloser, buf *bytes.Buffer) error {
+func readFromIo(read io.Reader, buf *bytes.Buffer) error {
 	b := make([]byte, 4096)
 	for {
 		n, err := read.Read(b)
@@ -155,6 +120,9 @@ func (app *App) asyncWait(stdOut, stdErr *bytes.Buffer,
 	app.sendExitCodeOrError(exitCode, err)
 }
 
+// Start run application asynchronously and
+// return channel to wait/track exit state and status.
+// If application failed to run, error returned,
 func (app *App) Start(stdOut *bytes.Buffer,
 	stdErr *bytes.Buffer) (chan ExitCodeOrError, error) {
 	var readOut io.ReadCloser
@@ -181,7 +149,11 @@ func (app *App) Start(stdOut *bytes.Buffer,
 	return app.waitCh, nil
 }
 
+// CheckIsInstalled use Linux utility [which] to find
+// that executable installed or not in the system.
 func (app *App) CheckIsInstalled() error {
+	// Can't use [whereis], because it doesn't return correct exit code
+	// based on search results. Can use [type], as an option.
 	whApp := NewApp("which", app.cmd.Path)
 	st := whApp.Run(nil, nil)
 	if st.Error != nil {
@@ -193,11 +165,14 @@ func (app *App) CheckIsInstalled() error {
 	return nil
 }
 
+// ExitCodeOrError return exit status once application has been finished.
 func (app *App) ExitCodeOrError() *ExitCodeOrError {
 	ref := app.exitCodeOrError.Load()
 	return ref.(*ExitCodeOrError)
 }
 
+// Wait switch from asynchronous mode to synchronous
+// and wait until application is finished.
 func (app *App) Wait() ExitCodeOrError {
 	st, ok := <-app.waitCh
 	if ok {
@@ -207,16 +182,17 @@ func (app *App) Wait() ExitCodeOrError {
 	}
 }
 
+// Kill terminate application started asynchronously.
 func (app *App) Kill() error {
 	log.Println(fmt.Sprintf("Start killing app: %v", app.cmd))
-	if isLinuxMacOSFreeBSD() {
+	if IsLinuxMacOSFreeBSD() {
 		// Kill not only main but all children processes,
 		// so extract for this purpose group id.
 		pgid, err := syscall.Getpgid(app.cmd.Process.Pid)
 		if err != nil {
 			return err
 		}
-		// Specifiing gid with negative sign led to killing children processes as well.
+		// Specifying gid with negative sign led to killing children processes as well.
 		err = syscall.Kill(-pgid, syscall.SIGKILL)
 		if err != nil {
 			return err
@@ -231,12 +207,4 @@ func (app *App) Kill() error {
 	state := app.Wait()
 	log.Println(fmt.Sprintf("Done killing app: %v", app.cmd))
 	return state.Error
-}
-
-func CheckRunAsRoot() bool {
-	uid := os.Geteuid()
-	if uid == 0 {
-		return true
-	}
-	return false
 }
