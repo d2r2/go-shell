@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
+	"sync"
 	"sync/atomic"
 	"syscall"
 )
@@ -68,14 +68,15 @@ func (app *App) Run(stdOut *bytes.Buffer, stdErr *bytes.Buffer) ExitCodeOrError 
 
 func (app *App) sendExitCodeOrError(exitCode int, err error) {
 	state := &ExitCodeOrError{ExitCode: exitCode, Error: err}
+	// log.Printf("Exit status: %+v", state)
 	app.exitCodeOrError.Store(state)
 	app.waitCh <- *state
 }
 
 func readFromIo(read io.Reader, buf *bytes.Buffer) error {
-	b := make([]byte, 4096)
+	var b [4096]byte
 	for {
-		n, err := read.Read(b)
+		n, err := read.Read(b[:])
 		if n > 0 {
 			buf.Write(b[:n])
 		}
@@ -92,20 +93,31 @@ func readFromIo(read io.Reader, buf *bytes.Buffer) error {
 func (app *App) asyncWait(stdOut, stdErr *bytes.Buffer,
 	readOut, readErr io.ReadCloser) {
 	defer close(app.waitCh)
+
+	var wg sync.WaitGroup
 	if readOut != nil {
-		err2 := readFromIo(readOut, stdOut)
-		if err2 != nil {
-			app.sendExitCodeOrError(0, err2)
-			return
-		}
+		func(wg *sync.WaitGroup) {
+			wg.Add(1)
+			defer wg.Done()
+			err2 := readFromIo(readOut, stdOut)
+			if err2 != nil {
+				app.sendExitCodeOrError(0, err2)
+				return
+			}
+		}(&wg)
 	}
 	if readErr != nil {
-		err2 := readFromIo(readErr, stdErr)
-		if err2 != nil {
-			app.sendExitCodeOrError(0, err2)
-			return
-		}
+		func(wg *sync.WaitGroup) {
+			wg.Add(1)
+			defer wg.Done()
+			err2 := readFromIo(readErr, stdErr)
+			if err2 != nil {
+				app.sendExitCodeOrError(0, err2)
+				return
+			}
+		}(&wg)
 	}
+	wg.Wait()
 	err := app.cmd.Wait()
 	var exitCode int
 	if err != nil {
@@ -184,15 +196,15 @@ func (app *App) Wait() ExitCodeOrError {
 
 // Kill terminate application started asynchronously.
 func (app *App) Kill() error {
-	log.Println(fmt.Sprintf("Start killing app: %v", app.cmd))
+	//log.Println(fmt.Sprintf("Start killing app: %v", app.cmd))
 	if IsLinuxMacOSFreeBSD() {
-		// Kill not only main but all children processes,
+		// Kill not only main but all child processes,
 		// so extract for this purpose group id.
 		pgid, err := syscall.Getpgid(app.cmd.Process.Pid)
 		if err != nil {
 			return err
 		}
-		// Specifying gid with negative sign led to killing children processes as well.
+		// Specifying gid with negative sign also results in the killing of child processes.
 		err = syscall.Kill(-pgid, syscall.SIGKILL)
 		if err != nil {
 			return err
@@ -205,6 +217,6 @@ func (app *App) Kill() error {
 		}
 	}
 	state := app.Wait()
-	log.Println(fmt.Sprintf("Done killing app: %v", app.cmd))
+	//log.Println(fmt.Sprintf("Done killing app: %v", app.cmd))
 	return state.Error
 }
