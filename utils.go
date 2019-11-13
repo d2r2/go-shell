@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -29,6 +30,7 @@ func CheckRunAsRoot() bool {
 
 // GetFreeSpace use syscall to find free space for path specified.
 func GetFreeSpace(path string) (uint64, error) {
+	const errMsg = "can't detect free space available on the system"
 	var space uint64
 	if IsLinuxMacOSFreeBSD() {
 		var stat syscall.Statfs_t
@@ -36,9 +38,17 @@ func GetFreeSpace(path string) (uint64, error) {
 		if err != nil {
 			return 0, err
 		}
-		// Available blocks * size per block = available space in bytes
-		space = stat.Bavail * uint64(stat.Bsize)
-	} /* else {
+		// stat.Bavail type is not the same on Linux and FreeBSD, so
+		// check that it valid, than cast it to UINT64.
+		if stat.Bavail < 0 {
+			return 0, errors.New(errMsg)
+		}
+		// Available blocks * size per block = available space in bytes.
+		space = uint64(stat.Bavail) * uint64(stat.Bsize)
+	} else {
+		return 0, errors.New(errMsg)
+	}
+	/* else {
 		h := syscall.LoadLibrary("kernel32.dll")
 		c := h.MustFindProc("GetDiskFreeSpaceExW")
 		var freeBytes int64
