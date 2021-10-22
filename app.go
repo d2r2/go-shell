@@ -1,12 +1,10 @@
 package shell
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"sync"
 	"sync/atomic"
 	"syscall"
 )
@@ -51,8 +49,8 @@ func (app *App) AddEnvironments(env []string) {
 // stdout/stderr output, to get output.
 // Method doesn't return control until the application
 // finishes its execution.
-func (app *App) Run(stdOut *bytes.Buffer, stdErr *bytes.Buffer) ExitCodeOrError {
-	_, err := app.Start(stdOut, stdErr)
+func (app *App) Run(stdin io.Reader, stdout, stderr io.Writer) ExitCodeOrError {
+	_, err := app.Start(stdin, stdout, stderr)
 	if err != nil {
 		return ExitCodeOrError{0, err}
 	}
@@ -73,51 +71,9 @@ func (app *App) sendExitCodeOrError(exitCode int, err error) {
 	app.waitCh <- *state
 }
 
-func readFromIo(read io.Reader, buf *bytes.Buffer) error {
-	var b [4096]byte
-	for {
-		n, err := read.Read(b[:])
-		if n > 0 {
-			buf.Write(b[:n])
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (app *App) asyncWait(stdOut, stdErr *bytes.Buffer,
-	readOut, readErr io.ReadCloser) {
+func (app *App) asyncWait() {
 	defer close(app.waitCh)
 
-	var wg sync.WaitGroup
-	if readOut != nil {
-		func(wg *sync.WaitGroup) {
-			wg.Add(1)
-			defer wg.Done()
-			err2 := readFromIo(readOut, stdOut)
-			if err2 != nil {
-				app.sendExitCodeOrError(0, err2)
-				return
-			}
-		}(&wg)
-	}
-	if readErr != nil {
-		func(wg *sync.WaitGroup) {
-			wg.Add(1)
-			defer wg.Done()
-			err2 := readFromIo(readErr, stdErr)
-			if err2 != nil {
-				app.sendExitCodeOrError(0, err2)
-				return
-			}
-		}(&wg)
-	}
-	wg.Wait()
 	err := app.cmd.Wait()
 	var exitCode int
 	if err != nil {
@@ -135,39 +91,32 @@ func (app *App) asyncWait(stdOut, stdErr *bytes.Buffer,
 // Start run application asynchronously and
 // return channel to wait/track exit state and status.
 // If application failed to run, error returned,
-func (app *App) Start(stdOut *bytes.Buffer,
-	stdErr *bytes.Buffer) (chan ExitCodeOrError, error) {
-	var readOut io.ReadCloser
-	var readErr io.ReadCloser
-	var err error
-	if stdOut != nil {
-		readOut, err = app.cmd.StdoutPipe()
-		if err != nil {
-			return nil, err
-		}
+func (app *App) Start(stdin io.Reader, stdout, stderr io.Writer) (chan ExitCodeOrError, error) {
+	if stdin != nil {
+		app.cmd.Stdin = stdin
 	}
-	if stdErr != nil {
-		readErr, err = app.cmd.StderrPipe()
-		if err != nil {
-			return nil, err
-		}
+	if stdout != nil {
+		app.cmd.Stdout = stdout
 	}
-	err = app.cmd.Start()
+	if stderr != nil {
+		app.cmd.Stderr = stderr
+	}
+	err := app.cmd.Start()
 	if err != nil {
 		return nil, err
 	}
 	app.waitCh = make(chan ExitCodeOrError)
-	go app.asyncWait(stdOut, stdErr, readOut, readErr)
+	go app.asyncWait()
 	return app.waitCh, nil
 }
 
-// CheckIsInstalled use Linux utility [which] to find
-// that executable installed or not in the system.
+// CheckIsInstalled use Linux/FreeBSD utility [which] to find
+// if app is installed or not in the system.
 func (app *App) CheckIsInstalled() error {
-	// Can't use [whereis], because it doesn't return correct exit code
+	// Won't use [whereis], because it doesn't return correct exit code
 	// based on search results. Can use [type], as an option.
 	whApp := NewApp("which", app.cmd.Path)
-	st := whApp.Run(nil, nil)
+	st := whApp.Run(nil, nil, nil)
 	if st.Error != nil {
 		return st.Error
 	}
