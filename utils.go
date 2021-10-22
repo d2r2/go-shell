@@ -22,10 +22,8 @@ func IsLinuxMacOSFreeBSD() bool {
 // is running under root privileges.
 func CheckRunAsRoot() bool {
 	uid := os.Geteuid()
-	if uid == 0 {
-		return true
-	}
-	return false
+	// UID is equal to 0 for root user.
+	return uid == 0
 }
 
 // GetFreeSpace use syscall to find free space for path specified.
@@ -38,8 +36,9 @@ func GetFreeSpace(path string) (uint64, error) {
 		if err != nil {
 			return 0, err
 		}
-		// stat.Bavail type is not the same on Linux and FreeBSD, so
-		// check that it valid, than cast it to UINT64.
+		// stat.Bavail type is differs on Linux and FreeBSD, so
+		// this check is valid, despite warning about non-negative UINT64.
+		// So, please, ignore linter warning here.
 		if stat.Bavail < 0 {
 			return 0, errors.New(errMsg)
 		}
